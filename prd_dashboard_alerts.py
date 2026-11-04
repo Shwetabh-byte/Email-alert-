@@ -1,21 +1,32 @@
 """
 PR&D Dashboard Email Alert System
 ===================================
-Migrated from Google Apps Script on:
+Source sheet:
   "Team-wise PR&D Dashboard (from 1 Jul 2026)"
   https://docs.google.com/spreadsheets/d/1raKa11Nw_dy7i-D7FWisN8xfTuhsIBXZ0XN3r-lrkwE
 
+Data flow:
+  New DOD Master → Data!A1 formula (aggregates & assigns coordinator) → per-coordinator tabs
+
 What this does:
   - Connects to the PR&D Google Sheet via Google Sheets API
-  - Finds all Fully Ready OPFs that have:
+  - Reads the hidden Data tab (all OPFs with coordinator assignment already done)
+  - Categorises OPFs with any ready qty (Ready or Ready FF) that have:
       (a) Follow-up date = TODAY  → sends a reminder
-      (b) Follow-up date OVERDUE (past due, no dispatch remark) → sends an overdue alert
-      (c) OPFs with no follow-up date at all → flags them for attention
+      (b) Follow-up date OVERDUE (past due) → sends an overdue alert
+      (c) No follow-up date at all → flags them for attention
   - Sends a consolidated daily summary email to ops coordinators + Dileep sir
+
+OPF Status values from new DOD Master (after aggregation in Data tab):
+  "Fully Ready"             — all items status = Ready, nothing pending
+  "Fully Ready (FF)"        — all items status = Ready FF
+  "All pcs Ready FF"        — same as above (Ready FF only)
+  "Partly Ready – N pcs pending" — mix of Ready items + pending qty
 
 Usage:
   python prd_dashboard_alerts.py              # run once (manual / scheduled task)
   python prd_dashboard_alerts.py --test       # print alerts to console, don't send email
+  python prd_dashboard_alerts.py --dry-run    # same as --test
 
 Requirements:
   pip install google-api-python-client google-auth python-dotenv
@@ -131,8 +142,23 @@ def scan_tab(sheets, coordinator, tab_name, today):
     overdue     = []
     no_followup = []
 
-    # Skip header rows (first 3 rows are title/subtitle/column headers)
-    data_rows = rows[3:] if len(rows) > 3 else []
+    # Skip header rows:
+    #   Row 0 — Tab title  (e.g. "Fully Ready - Surabhi")
+    #   Row 1 — Subtitle / generated date
+    #   Row 2 — Filter info row
+    #   Row 3 — Column headers (OPF | Customer | …)
+    #   Row 4+ — Data
+    data_rows = rows[4:] if len(rows) > 4 else []
+
+    # Statuses from the new DOD Master formula that indicate action is needed.
+    # "Partly Ready – N pcs pending" is included so coordinators know some qty
+    # is ready even if dispatch is still blocked on the remaining pieces.
+    ALERT_STATUSES = {
+        "Fully Ready",          # all items Ready, nothing pending
+        "Fully Ready (FF)",     # all items Ready FF, nothing pending
+        "All pcs Ready FF",     # alias produced by the formula for FF-only OPFs
+        "Partly Ready",         # prefix match — catches "Partly Ready – N pcs pending"
+    }
 
     for row in data_rows:
         # Pad row to expected length
@@ -149,13 +175,22 @@ def scan_tab(sheets, coordinator, tab_name, today):
         followup_str = row[COL_FOLLOWUP_DATE].strip()
         remarks      = row[COL_REMARKS].strip()
 
-        # Skip empty rows or non-OPF rows
-        if not opf or opf.startswith("No fully") or not customer:
+        # Skip empty rows or placeholder/summary rows
+        if not opf or not customer:
+            continue
+        # Skip formula placeholder messages (e.g. "No data", "No fully ready…")
+        if opf.lower().startswith("no ") or customer.lower().startswith("no "):
             continue
 
-        # Only alert on Fully Ready OPFs
-        if status and "Fully Ready" not in status:
-            continue
+        # Only alert on OPFs that have ready (or partly ready) qty
+        # Match exact status strings or the "Partly Ready" prefix
+        if status:
+            matched = any(
+                status == s or status.startswith(s)
+                for s in ALERT_STATUSES
+            )
+            if not matched:
+                continue
 
         followup_date = parse_date(followup_str)
 
@@ -163,6 +198,7 @@ def scan_tab(sheets, coordinator, tab_name, today):
             "opf":          opf,
             "customer":     customer,
             "sales_person": sales_person,
+            "status":       status,
             "ready_qty":    ready_qty,
             "ready_items":  ready_items,
             "order_value":  order_value,
@@ -208,14 +244,28 @@ def format_opf_table(records):
     if not records:
         return "<p><em>None</em></p>"
 
+    # Status badge colours
+    STATUS_COLORS = {
+        "Fully Ready":        "#27ae60",   # green
+        "Fully Ready (FF)":   "#16a085",   # teal
+        "All pcs Ready FF":   "#16a085",   # teal
+    }
+
     rows_html = ""
     for r in records:
+        status_val   = r.get("status", "")
+        status_color = STATUS_COLORS.get(status_val, "#e67e22")  # orange for Partly Ready
+        status_badge = (
+            f'<span style="background:{status_color};color:white;padding:2px 7px;'
+            f'border-radius:3px;font-size:11px;white-space:nowrap">{status_val or "—"}</span>'
+        )
         rows_html += f"""
         <tr>
           <td style="padding:6px 10px;border:1px solid #ddd;font-weight:bold">{r['opf']}</td>
           <td style="padding:6px 10px;border:1px solid #ddd">{r['customer']}</td>
           <td style="padding:6px 10px;border:1px solid #ddd">{r['sales_person']}</td>
           <td style="padding:6px 10px;border:1px solid #ddd">{r['coordinator']}</td>
+          <td style="padding:6px 10px;border:1px solid #ddd">{status_badge}</td>
           <td style="padding:6px 10px;border:1px solid #ddd">{r['ready_qty']} pcs</td>
           <td style="padding:6px 10px;border:1px solid #ddd">{r['order_value']}</td>
           <td style="padding:6px 10px;border:1px solid #ddd">{r['followup_date'] or '—'}</td>
@@ -230,6 +280,7 @@ def format_opf_table(records):
           <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Customer</th>
           <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Sales Person</th>
           <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Ops Coordinator</th>
+          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Status</th>
           <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Ready Qty</th>
           <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Order Value</th>
           <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Follow-up Date</th>
@@ -403,20 +454,37 @@ def demo_mode(dry_run, today):
     due_today = [
         {
             "opf": "KTN/1276", "customer": "Sample Customer A", "sales_person": "Sonu Kumar",
-            "coordinator": "Surabhi", "ready_qty": "2", "ready_items": "802M x2",
+            "coordinator": "Surabhi", "status": "Fully Ready",
+            "ready_qty": "2", "ready_items": "802M x2",
             "order_value": "₹57,280", "followup_date": today.strftime("%m/%d/%Y"),
             "remarks": "Customer asked for delivery after Diwali",
-        }
+        },
+        {
+            "opf": "DEL/2201", "customer": "Cinema Corp", "sales_person": "Rahul Singh",
+            "coordinator": "Rosena", "status": "All pcs Ready FF",
+            "ready_qty": "4", "ready_items": "Cinema-Pro FF x4",
+            "order_value": "₹1,20,000", "followup_date": today.strftime("%m/%d/%Y"),
+            "remarks": "",
+        },
     ]
     overdue = [
         {
             "opf": "BLR/1004", "customer": "B.Sirisha", "sales_person": "J Prakash",
-            "coordinator": "Mohini Singh", "ready_qty": "1", "ready_items": "311 (Lisa-09) x1",
+            "coordinator": "Mohini Singh", "status": "Partly Ready – 2 pcs pending",
+            "ready_qty": "1", "ready_items": "311 (Lisa-09) x1",
             "order_value": "₹22,000", "followup_date": yesterday.strftime("%m/%d/%Y"),
             "remarks": "Waiting for balance payment",
         }
     ]
-    no_followup = []
+    no_followup = [
+        {
+            "opf": "HYD/0987", "customer": "Gulf Furnishings", "sales_person": "Dileep Kumar",
+            "coordinator": "Gautam Dusheja", "status": "Fully Ready (FF)",
+            "ready_qty": "3", "ready_items": "Recliner-X FF x3",
+            "order_value": "₹85,500", "followup_date": "",
+            "remarks": "Confirm shipping address",
+        }
+    ]
     send_alert_email(due_today, overdue, no_followup, today, dry_run=dry_run)
 
 
