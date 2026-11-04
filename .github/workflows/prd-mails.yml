@@ -1,0 +1,53 @@
+name: PR&D dashboard mails
+
+# Times are UTC (IST = UTC+5:30). GitHub may start scheduled runs a few minutes late.
+on:
+  schedule:
+    - cron: "30 3 * * *"    # 09:00 IST daily   -> morning status to coordinators
+    - cron: "30 10 * * *"   # 16:00 IST daily   -> 4 PM pending reminder
+    - cron: "30 4 * * 1"    # 10:00 IST Monday  -> weekly mail to Dileep ji & Sandeep ji
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "morning / afternoon / weekly"
+        required: true
+        default: morning
+      to_me:
+        description: "Send only to TEST_TO (yes/no)"
+        required: true
+        default: "yes"
+
+jobs:
+  send:
+    # Nothing is sent until the repository variable MAILS_LIVE is set to "true"
+    # (Settings → Secrets and variables → Actions → Variables).
+    if: vars.MAILS_LIVE == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Pick mail type
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 3 * * *" ]; then
+            echo "mode=morning" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 10 * * *" ]; then
+            echo "mode=afternoon" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=weekly" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Send
+        env:
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          TEST_TO: shwetabh@reclinersindia.com
+        run: |
+          EXTRA=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.to_me }}" = "yes" ]; then EXTRA="--to-me"; fi
+          python prd_mailer.py "${{ steps.mode.outputs.mode }}" $EXTRA
