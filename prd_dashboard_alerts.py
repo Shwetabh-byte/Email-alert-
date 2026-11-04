@@ -75,11 +75,18 @@ COL_FOLLOWUP_DATE   = 7
 COL_REMARK_DATE     = 8
 COL_REMARKS         = 9
 
-# Alert recipients
-ALERT_RECIPIENTS = [
-    os.getenv("ALERT_RECIPIENT", "dileep.kumar@reclinersindia.com"),
-    "shwetabh@reclinersindia.com",
-]
+# Per-coordinator email addresses and sheet tab GIDs
+# (GID used to build the deep-link to their specific tab in the sheet)
+COORDINATOR_CONFIG = {
+    "Surabhi":        {"email": "operation2@reclinersindia.com",   "gid": "602"},
+    "Mohini Singh":   {"email": "operation1@reclinersindia.com",   "gid": "603"},
+    "Rosena":         {"email": "rosena@reclinersindia.com",        "gid": "604"},
+    "Abhishek":       {"email": "abhishek.sharma@reclinersindia.com", "gid": "601"},
+    "Gautam Dusheja": {"email": "gautam.duseja@gulfrecliners.com",  "gid": "605"},
+}
+
+# CC on every mail
+CC_RECIPIENTS = ["shwetabh@reclinersindia.com"]
 
 # ── Google Sheets connection ───────────────────────────────────────────────────
 
@@ -218,199 +225,187 @@ def scan_tab(sheets, coordinator, tab_name, today):
 
 
 def collect_all_alerts(sheets):
-    """Scan all ops coordinator tabs and collect alerts."""
+    """Scan all ops coordinator tabs and return per-coordinator data dict."""
     today = datetime.date.today()
-    all_due_today   = []
-    all_overdue     = []
-    all_no_followup = []
+    coordinator_data = {}
 
     for coordinator, tab_name in OPS_COORDINATOR_TABS.items():
         try:
             due, overdue, no_fu = scan_tab(sheets, coordinator, tab_name, today)
-            all_due_today.extend(due)
-            all_overdue.extend(overdue)
-            all_no_followup.extend(no_fu)
-            print(f"  ✓ {coordinator}: {len(due)} due today, {len(overdue)} overdue, {len(no_fu)} no follow-up date")
+            # "all" = every record in this coordinator's tab (for the summary stats)
+            all_records = due + overdue + no_fu
+            coordinator_data[coordinator] = {
+                "all":        all_records,
+                "due_today":  due,
+                "overdue":    overdue,
+                "no_followup": no_fu,
+            }
+            print(f"  ✓ {coordinator}: {len(all_records)} OPFs | {len(due)} due today, {len(overdue)} overdue, {len(no_fu)} no date")
         except Exception as e:
             print(f"  ✗ Error reading tab '{tab_name}': {e}")
 
-    return all_due_today, all_overdue, all_no_followup
+    return coordinator_data
 
 
-# ── Email formatting ───────────────────────────────────────────────────────────
+# ── Email formatting (matches existing sent-mail style exactly) ────────────────
 
-def format_opf_table(records):
-    """Format a list of OPF records as an HTML table."""
-    if not records:
-        return "<p><em>None</em></p>"
+TH = 'style="background:#1F3864;color:#fff;padding:8px 14px;border:1px solid #c9c9c9;font-size:14px;text-align:left;font-weight:normal"'
+TD = 'style="background:#EEF2F8;padding:8px 14px;border:1px solid #d9d9d9;font-size:14px;font-weight:bold"'
+TH2 = 'style="background:#1F3864;color:#fff;padding:6px 10px;border:1px solid #c9c9c9;font-size:13px;text-align:left"'
+TD2 = 'style="padding:6px 10px;border:1px solid #d9d9d9;font-size:13px"'
+TD2R = 'style="padding:6px 10px;border:1px solid #d9d9d9;font-size:13px;text-align:right"'
 
-    # Status badge colours
-    STATUS_COLORS = {
-        "Fully Ready":        "#27ae60",   # green
-        "Fully Ready (FF)":   "#16a085",   # teal
-        "All pcs Ready FF":   "#16a085",   # teal
-    }
 
-    rows_html = ""
-    for r in records:
-        status_val   = r.get("status", "")
-        status_color = STATUS_COLORS.get(status_val, "#e67e22")  # orange for Partly Ready
-        status_badge = (
-            f'<span style="background:{status_color};color:white;padding:2px 7px;'
-            f'border-radius:3px;font-size:11px;white-space:nowrap">{status_val or "—"}</span>'
-        )
+def _parse_value(val_str):
+    """Convert '₹2,05,000' or '205000' to int for summing."""
+    try:
+        return int(str(val_str).replace("₹", "").replace(",", "").strip())
+    except Exception:
+        return 0
+
+
+def build_coordinator_email(coordinator, all_records, due_today_records, today, gid):
+    """Build per-coordinator HTML email matching the existing sent-mail style."""
+    date_str = today.strftime("%d-%b-%Y")
+
+    # Summary stats across ALL records for this coordinator
+    total_opfs  = len(all_records)
+    total_pcs   = sum(_parse_value(r.get("ready_qty", 0)) for r in all_records)
+    total_value = sum(_parse_value(r.get("order_value", 0)) for r in all_records)
+    value_fmt   = f"₹{total_value:,}" if total_value else "₹0"
+
+    # Summary table (always shown)
+    summary_table = f"""
+<table style="border-collapse:collapse;font-family:Arial,sans-serif;margin:0 0 14px 0">
+  <tr>
+    <th {TH}>Ops Coordinator</th>
+    <th {TH}>Fully Ready OPFs</th>
+    <th {TH}>Pieces Ready</th>
+    <th {TH}>Value Ready (₹)</th>
+  </tr>
+  <tr>
+    <td {TD}>{coordinator}</td>
+    <td {TD}>{total_opfs}</td>
+    <td {TD}>{total_pcs}</td>
+    <td {TD}>{value_fmt}</td>
+  </tr>
+</table>"""
+
+    sheet_link = (
+        f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid={gid}'
+    )
+
+    # Follow-up table (only when there are due-today records)
+    n = len(due_today_records)
+    if n:
+        rows_html = ""
+        sum_pcs = 0
+        sum_val = 0
+        for i, r in enumerate(due_today_records, 1):
+            pcs = _parse_value(r.get("ready_qty", 0))
+            val = _parse_value(r.get("order_value", 0))
+            sum_pcs += pcs
+            sum_val += val
+            rows_html += f"""
+  <tr>
+    <td {TD2R}>{i}</td>
+    <td {TD2}>{r.get("sales_person","")}</td>
+    <td {TD2}>{r.get("customer","")}</td>
+    <td {TD2R}>{pcs}</td>
+    <td {TD2R}>₹{val:,}</td>
+  </tr>"""
         rows_html += f"""
-        <tr>
-          <td style="padding:6px 10px;border:1px solid #ddd;font-weight:bold">{r['opf']}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{r['customer']}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{r['sales_person']}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{r['coordinator']}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{status_badge}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{r['ready_qty']} pcs</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{r['order_value']}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd">{r['followup_date'] or '—'}</td>
-          <td style="padding:6px 10px;border:1px solid #ddd;color:#555">{r['remarks'] or '—'}</td>
-        </tr>"""
+  <tr>
+    <td {TD2}></td>
+    <td {TD2}><b>Total</b></td>
+    <td {TD2}></td>
+    <td {TD2R}><b>{sum_pcs}</b></td>
+    <td {TD2R}><b>₹{sum_val:,}</b></td>
+  </tr>"""
 
-    return f"""
-    <table style="border-collapse:collapse;width:100%;font-size:13px">
-      <thead>
-        <tr style="background:#f0f0f0">
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">OPF</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Customer</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Sales Person</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Ops Coordinator</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Status</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Ready Qty</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Order Value</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Follow-up Date</th>
-          <th style="padding:8px 10px;border:1px solid #ddd;text-align:left">Last Remark</th>
-        </tr>
-      </thead>
-      <tbody>{rows_html}</tbody>
-    </table>"""
-
-
-def build_email_body(due_today, overdue, no_followup, today):
-    """Build the HTML email body."""
-    date_str = today.strftime("%d %b %Y")
-
-    sections = []
-
-    if due_today:
-        sections.append(f"""
-        <h3 style="color:#e67e22;margin-top:20px">
-          📅 Follow-up Due TODAY ({len(due_today)} OPFs)
-        </h3>
-        <p style="color:#555;font-size:13px">These fully ready OPFs are scheduled for follow-up today.
-        Please contact the customer or ops coordinator immediately.</p>
-        {format_opf_table(due_today)}""")
-
-    if overdue:
-        sections.append(f"""
-        <h3 style="color:#e74c3c;margin-top:30px">
-          🔴 Overdue Follow-ups ({len(overdue)} OPFs)
-        </h3>
-        <p style="color:#555;font-size:13px">These OPFs have passed their follow-up date and are still Fully Ready —
-        dispatch is pending. Immediate action required.</p>
-        {format_opf_table(overdue)}""")
-
-    if no_followup:
-        sections.append(f"""
-        <h3 style="color:#8e44ad;margin-top:30px">
-          ⚠️ No Follow-up Date Set ({len(no_followup)} OPFs)
-        </h3>
-        <p style="color:#555;font-size:13px">These fully ready OPFs have no follow-up date.
-        Please set a follow-up date in the dashboard.</p>
-        {format_opf_table(no_followup)}""")
-
-    if not sections:
-        sections.append("""
-        <div style="padding:20px;background:#d5f5e3;border-radius:6px;margin-top:20px">
-          <h3 style="color:#27ae60;margin:0">✅ All Clear!</h3>
-          <p style="color:#555;margin:8px 0 0">No pending follow-ups or overdue OPFs today. Great work!</p>
-        </div>""")
-
-    total = len(due_today) + len(overdue) + len(no_followup)
-    summary_color = "#27ae60" if total == 0 else ("#e74c3c" if overdue else "#e67e22")
-
-    return f"""
-    <div style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto">
-      <div style="background:#2c3e50;color:white;padding:20px 25px;border-radius:6px 6px 0 0">
-        <h2 style="margin:0;font-size:20px">RIPL PR&D Dashboard — Daily OPF Alert</h2>
-        <p style="margin:5px 0 0;opacity:0.8;font-size:13px">{date_str}</p>
-      </div>
-
-      <div style="background:#ecf0f1;padding:15px 25px;border-left:4px solid {summary_color}">
-        <strong style="color:{summary_color}">Summary:</strong>&nbsp;
-        <span style="color:#e74c3c">{len(overdue)} Overdue</span> &nbsp;|&nbsp;
-        <span style="color:#e67e22">{len(due_today)} Due Today</span> &nbsp;|&nbsp;
-        <span style="color:#8e44ad">{len(no_followup)} No Follow-up Date</span>
-      </div>
-
-      <div style="padding:0 25px 25px">
-        {''.join(sections)}
-
-        <hr style="margin-top:30px;border:none;border-top:1px solid #ddd">
-        <p style="color:#aaa;font-size:11px;margin-top:10px">
-          Auto-generated by RIPL Email Alert System ·
-          <a href="https://docs.google.com/spreadsheets/d/1raKa11Nw_dy7i-D7FWisN8xfTuhsIBXZ0XN3r-lrkwE"
-             style="color:#3498db">Open PR&D Dashboard</a>
-        </p>
-      </div>
-    </div>"""
-
-
-# ── Send email ─────────────────────────────────────────────────────────────────
-
-def send_alert_email(due_today, overdue, no_followup, today, dry_run=False):
-    """Send the alert email via the existing AlertManager."""
-    # Import from parent email alert system
-    sys.path.insert(0, str(Path(__file__).parent))
-    from config import EmailConfig
-    from alert_manager import AlertManager
-
-    config = EmailConfig(
-        email_address=os.getenv("EMAIL_ADDRESS", ""),
-        email_password=os.getenv("EMAIL_PASSWORD", ""),
-        default_recipients=ALERT_RECIPIENTS,
-    )
-
-    total_issues = len(due_today) + len(overdue) + len(no_followup)
-    subject_date = today.strftime("%d %b")
-
-    if overdue:
-        subject = f"[RIPL-ALERT] 🔴 {len(overdue)} Overdue OPFs + {len(due_today)} Due Today — {subject_date}"
-        priority = "high"
-    elif due_today:
-        subject = f"[RIPL-ALERT] 📅 {len(due_today)} OPF Follow-ups Due Today — {subject_date}"
-        priority = "medium"
-    elif no_followup:
-        subject = f"[RIPL-ALERT] ⚠️ {len(no_followup)} Fully Ready OPFs Have No Follow-up Date — {subject_date}"
-        priority = "low"
+        followup_section = f"""<p>These fully ready OPFs are due for follow-up today ({date_str}):</p>
+<table style="border-collapse:collapse;font-family:Arial,sans-serif;margin:10px 0">
+  <tr>
+    <th {TH2}>S.No</th>
+    <th {TH2}>Sales Person</th>
+    <th {TH2}>Customer</th>
+    <th {TH2}>Ready Qty</th>
+    <th {TH2}>Order Value</th>
+  </tr>{rows_html}
+</table>"""
     else:
-        subject = f"[RIPL-ALERT] ✅ All Clear — No Pending OPF Follow-ups — {subject_date}"
-        priority = "low"
+        followup_section = f"<p>No follow-ups are due today ({date_str}).</p>"
 
-    body = build_email_body(due_today, overdue, no_followup, today)
+    first_name = coordinator.split()[0]
+    html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+<p>Hi {first_name},</p>
+<p style="font-weight:bold;font-size:15px;margin:14px 0 4px 0">Your Fully Ready OPF Summary</p>
+{summary_table}
+{followup_section}
+<p>After following up, update the <b>Remark date</b>, <b>Remarks</b> and the <b>Next Follow up Date</b> in your tab: <a href="{sheet_link}">open your tab</a>.</p>
+<p style="color:#888;font-size:12px">Automatic reminder from the Team-wise OPF Readiness Dashboard.</p>
+</div>"""
 
-    if dry_run:
-        print("\n" + "=" * 60)
-        print("DRY RUN — Would send:")
-        print(f"  Subject : {subject}")
-        print(f"  Priority: {priority}")
-        print(f"  To      : {', '.join(ALERT_RECIPIENTS)}")
-        print("=" * 60)
-        return
+    return html
 
-    manager = AlertManager(config)
-    manager.send(
-        subject=subject,
-        body=body,
-        recipients=ALERT_RECIPIENTS,
-        priority=priority,
-    )
-    print(f"\n✅ Alert email sent to: {', '.join(ALERT_RECIPIENTS)}")
+
+def build_subject(coordinator, n_due, today):
+    date_str = today.strftime("%d-%b-%Y")
+    if n_due:
+        return f"Daily fully ready OPF status – {date_str} ({n_due} follow-up{'s' if n_due!=1 else ''} due today)"
+    else:
+        return f"Daily fully ready OPF status – {date_str} (0 follow-ups due today)"
+
+
+# ── Send per-coordinator email ─────────────────────────────────────────────────
+
+def send_coordinator_emails(coordinator_data, today, dry_run=False):
+    """Send one email per coordinator, matching the existing sent-mail style."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    smtp_server  = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port    = int(os.getenv("SMTP_PORT", 587))
+    email_addr   = os.getenv("EMAIL_ADDRESS", "")
+    email_pass   = os.getenv("EMAIL_PASSWORD", "")
+
+    for coordinator, data in coordinator_data.items():
+        cfg            = COORDINATOR_CONFIG[coordinator]
+        all_records    = data["all"]
+        due_today      = data["due_today"]
+        n_due          = len(due_today)
+
+        subject = build_subject(coordinator, n_due, today)
+        body    = build_coordinator_email(
+            coordinator, all_records, due_today, today, cfg["gid"]
+        )
+        to_addr = cfg["email"]
+
+        if dry_run:
+            print(f"\n{'='*60}")
+            print(f"DRY RUN — {coordinator}")
+            print(f"  To      : {to_addr}")
+            print(f"  CC      : {', '.join(CC_RECIPIENTS)}")
+            print(f"  Subject : {subject}")
+            print(f"  OPFs    : {len(all_records)} total | {n_due} due today")
+            print(f"{'='*60}")
+            continue
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = f"OPF Follow-up Reminder <{email_addr}>"
+        msg["To"]      = to_addr
+        msg["Cc"]      = ", ".join(CC_RECIPIENTS)
+        msg.attach(MIMEText(body, "html"))
+
+        recipients = [to_addr] + CC_RECIPIENTS
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(email_addr, email_pass)
+            server.sendmail(email_addr, recipients, msg.as_string())
+
+        print(f"  ✅ Sent to {coordinator} ({to_addr})")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -436,56 +431,57 @@ def main():
 
     # Scan all tabs
     print("\nScanning ops coordinator tabs...")
-    due_today, overdue, no_followup = collect_all_alerts(sheets)
+    coordinator_data = collect_all_alerts(sheets)
 
-    print(f"\nResults:")
-    print(f"  Due today : {len(due_today)}")
-    print(f"  Overdue   : {len(overdue)}")
-    print(f"  No date   : {len(no_followup)}")
+    total_due = sum(len(d["due_today"]) for d in coordinator_data.values())
+    total_ov  = sum(len(d["overdue"])   for d in coordinator_data.values())
+    print(f"\nResults: {total_due} due today, {total_ov} overdue across all coordinators")
 
-    # Send email
-    print("\nSending alert email...")
-    send_alert_email(due_today, overdue, no_followup, today, dry_run=dry_run)
+    # Send one email per coordinator
+    print(f"\n{'Previewing' if dry_run else 'Sending'} emails...")
+    send_coordinator_emails(coordinator_data, today, dry_run=dry_run)
 
 
 def demo_mode(dry_run, today):
-    """Run with sample data to show what the email would look like."""
+    """Run with sample data matching the real coordinator structure."""
     yesterday = today - datetime.timedelta(days=1)
-    due_today = [
-        {
-            "opf": "KTN/1276", "customer": "Sample Customer A", "sales_person": "Sonu Kumar",
-            "coordinator": "Surabhi", "status": "Fully Ready",
-            "ready_qty": "2", "ready_items": "802M x2",
-            "order_value": "₹57,280", "followup_date": today.strftime("%m/%d/%Y"),
-            "remarks": "Customer asked for delivery after Diwali",
+
+    coordinator_data = {
+        "Surabhi": {
+            "all": [
+                {"opf":"KTN/1276","customer":"Prakshit Garg","sales_person":"Sonu Kumar","status":"Fully Ready","ready_qty":"7","order_value":"₹1,39,240","followup_date":today.strftime("%m/%d/%Y"),"remarks":""},
+                {"opf":"BOM/0821","customer":"SAWARIA AGRO INDUSTRIES","sales_person":"Ali Ahmed","status":"Fully Ready","ready_qty":"13","order_value":"₹3,99,858","followup_date":today.strftime("%m/%d/%Y"),"remarks":""},
+                {"opf":"DLH/1105","customer":"Mrs. Manisha Mehra","sales_person":"Payal Mandal","status":"Fully Ready","ready_qty":"5","order_value":"₹2,05,000","followup_date":yesterday.strftime("%m/%d/%Y"),"remarks":"Follow-up pending"},
+            ],
+            "due_today": [
+                {"opf":"KTN/1276","customer":"Prakshit Garg","sales_person":"Sonu Kumar","status":"Fully Ready","ready_qty":"7","order_value":"₹1,39,240","followup_date":today.strftime("%m/%d/%Y"),"remarks":""},
+                {"opf":"BOM/0821","customer":"SAWARIA AGRO INDUSTRIES","sales_person":"Ali Ahmed","status":"Fully Ready","ready_qty":"13","order_value":"₹3,99,858","followup_date":today.strftime("%m/%d/%Y"),"remarks":""},
+            ],
+            "overdue": [],
+            "no_followup": [],
         },
-        {
-            "opf": "DEL/2201", "customer": "Cinema Corp", "sales_person": "Rahul Singh",
-            "coordinator": "Rosena", "status": "All pcs Ready FF",
-            "ready_qty": "4", "ready_items": "Cinema-Pro FF x4",
-            "order_value": "₹1,20,000", "followup_date": today.strftime("%m/%d/%Y"),
-            "remarks": "",
+        "Mohini Singh": {
+            "all": [
+                {"opf":"BLR/1004","customer":"B.Sirisha","sales_person":"J Prakash","status":"Fully Ready","ready_qty":"1","order_value":"₹22,000","followup_date":yesterday.strftime("%m/%d/%Y"),"remarks":"Waiting for balance payment"},
+            ],
+            "due_today": [],
+            "overdue": [
+                {"opf":"BLR/1004","customer":"B.Sirisha","sales_person":"J Prakash","status":"Fully Ready","ready_qty":"1","order_value":"₹22,000","followup_date":yesterday.strftime("%m/%d/%Y"),"remarks":"Waiting for balance payment"},
+            ],
+            "no_followup": [],
         },
-    ]
-    overdue = [
-        {
-            "opf": "BLR/1004", "customer": "B.Sirisha", "sales_person": "J Prakash",
-            "coordinator": "Mohini Singh", "status": "Partly Ready – 2 pcs pending",
-            "ready_qty": "1", "ready_items": "311 (Lisa-09) x1",
-            "order_value": "₹22,000", "followup_date": yesterday.strftime("%m/%d/%Y"),
-            "remarks": "Waiting for balance payment",
-        }
-    ]
-    no_followup = [
-        {
-            "opf": "HYD/0987", "customer": "Gulf Furnishings", "sales_person": "Dileep Kumar",
-            "coordinator": "Gautam Dusheja", "status": "Fully Ready (FF)",
-            "ready_qty": "3", "ready_items": "Recliner-X FF x3",
-            "order_value": "₹85,500", "followup_date": "",
-            "remarks": "Confirm shipping address",
-        }
-    ]
-    send_alert_email(due_today, overdue, no_followup, today, dry_run=dry_run)
+        "Gautam Dusheja": {
+            "all": [
+                {"opf":"HYD/0987","customer":"Gulf Furnishings","sales_person":"Dileep Kumar","status":"All pcs Ready FF","ready_qty":"3","order_value":"₹85,500","followup_date":"","remarks":"Confirm shipping address"},
+            ],
+            "due_today": [],
+            "overdue":   [],
+            "no_followup": [
+                {"opf":"HYD/0987","customer":"Gulf Furnishings","sales_person":"Dileep Kumar","status":"All pcs Ready FF","ready_qty":"3","order_value":"₹85,500","followup_date":"","remarks":"Confirm shipping address"},
+            ],
+        },
+    }
+    send_coordinator_emails(coordinator_data, today, dry_run=dry_run)
 
 
 if __name__ == "__main__":
