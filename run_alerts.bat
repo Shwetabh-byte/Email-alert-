@@ -9,7 +9,7 @@ echo.
 
 :: Install dependencies if not already installed
 echo Installing dependencies...
-pip install python-dotenv --quiet
+pip install python-dotenv google-api-python-client google-auth --quiet
 
 echo.
 echo Starting alert system...
