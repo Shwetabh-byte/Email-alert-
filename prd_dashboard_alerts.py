@@ -79,9 +79,9 @@ COL_REMARKS         = 9
 # (GID used to build the deep-link to their specific tab in the sheet)
 COORDINATOR_CONFIG = {
     "Surabhi":        {"email": "operation2@reclinersindia.com",   "gid": "602"},
-    "Mohini Singh":   {"email": "operation1@reclinersindia.com",   "gid": "603"},
-    "Rosena":         {"email": "rosena@reclinersindia.com",        "gid": "604"},
-    "Abhishek":       {"email": "abhishek.sharma@reclinersindia.com", "gid": "601"},
+    "Mohini Singh":   {"email": "operation1@reclinersindia.com",   "gid": "601"},
+    "Rosena":         {"email": "rosena.jamal@reclinersindia.com",  "gid": "603"},
+    "Abhishek":       {"email": "abhishek.sharma@reclinersindia.com", "gid": "604"},
     "Gautam Dusheja": {"email": "gautam.duseja@gulfrecliners.com",  "gid": "605"},
 }
 
