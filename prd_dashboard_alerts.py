@@ -295,11 +295,53 @@ def build_coordinator_email(coordinator, all_records, due_today_records, today, 
         f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid={gid}'
     )
 
+    # Follow-up table (only when there are due-today records)
+    n = len(due_today_records)
+    if n:
+        rows_html = ""
+        sum_pcs = 0
+        sum_val = 0
+        for i, r in enumerate(due_today_records, 1):
+            pcs = _parse_value(r.get("ready_qty", 0))
+            val = _parse_value(r.get("order_value", 0))
+            sum_pcs += pcs
+            sum_val += val
+            rows_html += f"""
+  <tr>
+    <td {TD2R}>{i}</td>
+    <td {TD2}>{r.get("sales_person","")}</td>
+    <td {TD2}>{r.get("customer","")}</td>
+    <td {TD2R}>{pcs}</td>
+    <td {TD2R}>₹{val:,}</td>
+  </tr>"""
+        rows_html += f"""
+  <tr>
+    <td {TD2}></td>
+    <td {TD2}><b>Total</b></td>
+    <td {TD2}></td>
+    <td {TD2R}><b>{sum_pcs}</b></td>
+    <td {TD2R}><b>₹{sum_val:,}</b></td>
+  </tr>"""
+
+        followup_section = f"""<p>These fully ready OPFs are due for follow-up today ({date_str}):</p>
+<table style="border-collapse:collapse;font-family:Arial,sans-serif;margin:10px 0">
+  <tr>
+    <th {TH2}>S.No</th>
+    <th {TH2}>Sales Person</th>
+    <th {TH2}>Customer</th>
+    <th {TH2}>Ready Qty</th>
+    <th {TH2}>Order Value</th>
+  </tr>{rows_html}
+</table>"""
+    else:
+        followup_section = f"<p>No follow-ups are due today ({date_str}).</p>"
+
     first_name = coordinator.split()[0]
     html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
 <p>Hi {first_name},</p>
 <p style="font-weight:bold;font-size:15px;margin:14px 0 4px 0">Your Fully Ready OPF Summary</p>
 {summary_table}
+{followup_section}
 <p>After following up, update the <b>Remark date</b>, <b>Remarks</b> and the <b>Next Follow up Date</b> in your tab: <a href="{sheet_link}">open your tab</a>.</p>
 <p style="color:#888;font-size:12px">Automatic reminder from the Team-wise OPF Readiness Dashboard.</p>
 </div>"""
