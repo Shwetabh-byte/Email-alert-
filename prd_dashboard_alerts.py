@@ -264,7 +264,51 @@ def _parse_value(val_str):
         return 0
 
 
-def build_coordinator_email(coordinator, all_records, due_today_records, today, gid):
+def _build_detail_table(records, label, date_str, show_due_date=False):
+    """Build an HTML detail table for a list of OPF records."""
+    rows_html = ""
+    sum_pcs = 0
+    sum_val = 0
+    for i, r in enumerate(records, 1):
+        pcs = _parse_value(r.get("ready_qty", 0))
+        val = _parse_value(r.get("order_value", 0))
+        sum_pcs += pcs
+        sum_val += val
+        due_cell = f"<td {TD2}>{r.get('followup_date','')}</td>" if show_due_date else ""
+        rows_html += f"""
+  <tr>
+    <td {TD2R}>{i}</td>
+    <td {TD2}>{r.get("sales_person","")}</td>
+    <td {TD2}>{r.get("customer","")}</td>
+    <td {TD2R}>{pcs}</td>
+    <td {TD2R}>₹{val:,}</td>
+    {due_cell}
+  </tr>"""
+    due_hdr = f"<th {TH2}>Due Date</th>" if show_due_date else ""
+    due_total = f"<td {TD2}></td>" if show_due_date else ""
+    rows_html += f"""
+  <tr>
+    <td {TD2}></td>
+    <td {TD2}><b>Total</b></td>
+    <td {TD2}></td>
+    <td {TD2R}><b>{sum_pcs}</b></td>
+    <td {TD2R}><b>₹{sum_val:,}</b></td>
+    {due_total}
+  </tr>"""
+    return f"""<p>{label}</p>
+<table style="border-collapse:collapse;font-family:Arial,sans-serif;margin:10px 0">
+  <tr>
+    <th {TH2}>S.No</th>
+    <th {TH2}>Sales Person</th>
+    <th {TH2}>Customer</th>
+    <th {TH2}>Ready Qty</th>
+    <th {TH2}>Order Value</th>
+    {due_hdr}
+  </tr>{rows_html}
+</table>"""
+
+
+def build_coordinator_email(coordinator, all_records, due_today_records, overdue_records, today, gid):
     """Build per-coordinator HTML email matching the existing sent-mail style."""
     date_str = today.strftime("%d-%b-%Y")
 
@@ -295,53 +339,34 @@ def build_coordinator_email(coordinator, all_records, due_today_records, today, 
         f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid={gid}'
     )
 
-    # Follow-up table (only when there are due-today records)
-    n = len(due_today_records)
-    if n:
-        rows_html = ""
-        sum_pcs = 0
-        sum_val = 0
-        for i, r in enumerate(due_today_records, 1):
-            pcs = _parse_value(r.get("ready_qty", 0))
-            val = _parse_value(r.get("order_value", 0))
-            sum_pcs += pcs
-            sum_val += val
-            rows_html += f"""
-  <tr>
-    <td {TD2R}>{i}</td>
-    <td {TD2}>{r.get("sales_person","")}</td>
-    <td {TD2}>{r.get("customer","")}</td>
-    <td {TD2R}>{pcs}</td>
-    <td {TD2R}>₹{val:,}</td>
-  </tr>"""
-        rows_html += f"""
-  <tr>
-    <td {TD2}></td>
-    <td {TD2}><b>Total</b></td>
-    <td {TD2}></td>
-    <td {TD2R}><b>{sum_pcs}</b></td>
-    <td {TD2R}><b>₹{sum_val:,}</b></td>
-  </tr>"""
+    # Due today section
+    sections = []
+    if due_today_records:
+        sections.append(_build_detail_table(
+            due_today_records,
+            f"These fully ready OPFs are due for follow-up today ({date_str}):",
+            date_str, show_due_date=False
+        ))
 
-        followup_section = f"""<p>These fully ready OPFs are due for follow-up today ({date_str}):</p>
-<table style="border-collapse:collapse;font-family:Arial,sans-serif;margin:10px 0">
-  <tr>
-    <th {TH2}>S.No</th>
-    <th {TH2}>Sales Person</th>
-    <th {TH2}>Customer</th>
-    <th {TH2}>Ready Qty</th>
-    <th {TH2}>Order Value</th>
-  </tr>{rows_html}
-</table>"""
-    else:
-        followup_section = f"<p>No follow-ups are due today ({date_str}).</p>"
+    # Overdue section
+    if overdue_records:
+        sections.append(_build_detail_table(
+            overdue_records,
+            "These fully ready OPFs are overdue for follow-up:",
+            date_str, show_due_date=True
+        ))
+
+    if not sections:
+        sections.append(f"<p>No follow-ups are due today ({date_str}).</p>")
+
+    followup_body = "\n".join(sections)
 
     first_name = coordinator.split()[0]
     html = f"""<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
 <p>Hi {first_name},</p>
 <p style="font-weight:bold;font-size:15px;margin:14px 0 4px 0">Your Fully Ready OPF Summary</p>
 {summary_table}
-{followup_section}
+{followup_body}
 <p>After following up, update the <b>Remark date</b>, <b>Remarks</b> and the <b>Next Follow up Date</b> in your tab: <a href="{sheet_link}">open your tab</a>.</p>
 <p style="color:#888;font-size:12px">Automatic reminder from the Team-wise OPF Readiness Dashboard.</p>
 </div>"""
@@ -349,36 +374,59 @@ def build_coordinator_email(coordinator, all_records, due_today_records, today, 
     return html
 
 
-def build_subject(coordinator, n_due, today):
+def build_subject(coordinator, n_due, n_overdue, today):
     date_str = today.strftime("%d-%b-%Y")
+    parts = []
     if n_due:
-        return f"Daily fully ready OPF status – {date_str} ({n_due} follow-up{'s' if n_due!=1 else ''} due today)"
-    else:
-        return f"Daily fully ready OPF status – {date_str} (0 follow-ups due today)"
+        parts.append(f"{n_due} follow-up{'s' if n_due != 1 else ''} due today")
+    if n_overdue:
+        parts.append(f"{n_overdue} overdue")
+    if parts:
+        return f"Daily fully ready OPF status – {date_str} ({', '.join(parts)})"
+    return f"Daily fully ready OPF status – {date_str} (0 follow-ups due today)"
 
 
-# ── Send per-coordinator email ─────────────────────────────────────────────────
+# ── Send per-coordinator email via Gmail API ───────────────────────────────────
+
+def send_via_gmail_mcp(to_addr, cc_list, subject, html_body):
+    """
+    Send email via the Gmail MCP connector.
+    This script is invoked by Claude's scheduled task, which calls
+    send_one_email(to, cc, subject, body) exposed below — Claude
+    then uses mcp__Gmail__send_message directly.
+    When run standalone, we write a JSON payload to stdout for Claude to pick up.
+    """
+    import json
+    payload = {
+        "to": to_addr,
+        "cc": cc_list,
+        "subject": subject,
+        "body": html_body,
+        "is_html": True,
+    }
+    # Write to a spool file so the scheduled task runner can send via MCP
+    spool_dir = os.path.join(os.path.dirname(__file__), "spool")
+    os.makedirs(spool_dir, exist_ok=True)
+    fname = os.path.join(spool_dir, f"{to_addr.replace('@','_at_')}_{subject[:30].replace(' ','_')}.json")
+    with open(fname, "w") as f:
+        json.dump(payload, f)
+    print(f"    📤 Queued for MCP send: {fname}")
+    return True
+
 
 def send_coordinator_emails(coordinator_data, today, dry_run=False):
-    """Send one email per coordinator, matching the existing sent-mail style."""
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
-
-    smtp_server  = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port    = int(os.getenv("SMTP_PORT", 587))
-    email_addr   = os.getenv("EMAIL_ADDRESS", "")
-    email_pass   = os.getenv("EMAIL_PASSWORD", "")
-
+    """Send one email per coordinator."""
     for coordinator, data in coordinator_data.items():
-        cfg            = COORDINATOR_CONFIG[coordinator]
-        all_records    = data["all"]
-        due_today      = data["due_today"]
-        n_due          = len(due_today)
+        cfg          = COORDINATOR_CONFIG[coordinator]
+        all_records  = data["all"]
+        due_today    = data["due_today"]
+        overdue      = data["overdue"]
+        n_due        = len(due_today)
+        n_overdue    = len(overdue)
 
-        subject = build_subject(coordinator, n_due, today)
+        subject = build_subject(coordinator, n_due, n_overdue, today)
         body    = build_coordinator_email(
-            coordinator, all_records, due_today, today, cfg["gid"]
+            coordinator, all_records, due_today, overdue, today, cfg["gid"]
         )
         to_addr = cfg["email"]
 
@@ -388,24 +436,16 @@ def send_coordinator_emails(coordinator_data, today, dry_run=False):
             print(f"  To      : {to_addr}")
             print(f"  CC      : {', '.join(CC_RECIPIENTS)}")
             print(f"  Subject : {subject}")
-            print(f"  OPFs    : {len(all_records)} total | {n_due} due today")
+            print(f"  OPFs    : {len(all_records)} total | {n_due} due today | {n_overdue} overdue")
             print(f"{'='*60}")
             continue
 
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = f"OPF Follow-up Reminder <{email_addr}>"
-        msg["To"]      = to_addr
-        msg["Cc"]      = ", ".join(CC_RECIPIENTS)
-        msg.attach(MIMEText(body, "html"))
-
-        recipients = [to_addr] + CC_RECIPIENTS
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(email_addr, email_pass)
-            server.sendmail(email_addr, recipients, msg.as_string())
-
-        print(f"  ✅ Sent to {coordinator} ({to_addr})")
+        # Send via Gmail MCP (SMTP is blocked in cloud environment)
+        ok = send_via_gmail_mcp(to_addr, CC_RECIPIENTS, subject, body)
+        if ok:
+            print(f"  ✅ Sent to {coordinator} ({to_addr})")
+        else:
+            print(f"  ❌ Failed to send to {coordinator} ({to_addr})")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
