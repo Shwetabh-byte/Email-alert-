@@ -1,5 +1,8 @@
 .env
 *.log
+google_credentials.json
+*credentials*.json
+*service_account*.json
 __pycache__/
 *.pyc
 *.pyo
